@@ -31,7 +31,7 @@ def mapbox_directions(lat1, lon1, lat2, lon2, profile="driving", annotations=Non
         "access_token": MAPBOX_TOKEN,
         "geometries": "geojson",
         "overview": "full",
-        "steps": "false",
+        "": "false",
         "alternatives": str(alternatives).lower(),
     }
     if annotations:
