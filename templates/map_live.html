@@ -1,0 +1,166 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Live_Traffic_Route</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+
+  <link
+    rel="stylesheet"
+    href="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.css"
+  />
+  <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 0; }
+    header { padding: 12px 16px; background: #111827; color: white; }
+    .container { padding: 12px 16px; }
+    #map { width: 100%; height: 70vh; border-top: 1px solid #e5e7eb; }
+    .panel { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+    input, button { padding: 8px 10px; border-radius: 8px; border: 1px solid #d1d5db; }
+    button { background: #111827; color: white; cursor: pointer; }
+    .stats { margin: 8px 0; }
+    .legend { display:flex; gap:12px; align-items:center; margin: 8px 0; }
+    .pill { display: inline-flex; align-items: center; gap: 6px; padding: 4px 8px; border-radius: 999px; background:#f3f4f6; border:1px solid #e5e7eb;}
+    .swatch { width: 12px; height: 12px; border-radius: 999px; display:inline-block; }
+    .error { color: #b91c1c; margin: 8px 0; }
+  </style>
+</head>
+<body>
+  <header><strong>Live Traffic</strong> — Mapbox (congestion + delay)</header>
+
+  <div class="container">
+    <div class="panel">
+      <input type="text" id="start" placeholder="Start (e.g., Delhi Railway Station)" size="35"/>
+      <input type="text" id="end" placeholder="End (e.g., Hapur)" size="35"/>
+      <button id="go">Show Route</button>
+      <span id="status"></span>
+    </div>
+
+    <div class="legend">
+      <span class="pill"><span class="swatch" style="background:green;"></span>Low</span>
+      <span class="pill"><span class="swatch" style="background:orange;"></span>Moderate</span>
+      <span class="pill"><span class="swatch" style="background:red;"></span>Heavy</span>
+      <span class="pill"><span class="swatch" style="background:darkred;"></span>Severe</span>
+      <span class="pill"><span class="swatch" style="background:gray;"></span>Unknown</span>
+    </div>
+
+    <div class="stats" id="stats"></div>
+    <div class="error" id="error"></div>
+
+    <div id="map"></div>
+  </div>
+
+  <script>
+    const MAPBOX_TOKEN = "{{ MAPBOX_TOKEN }}";
+    const REFRESH_SECONDS = {{ REFRESH_SECONDS|int }};
+    let map, segmentLayers = [], startMarker = null, endMarker = null, refreshTimer = null;
+
+    function initMap() {
+      map = L.map('map').setView([28.6139, 77.2090], 10);
+      L.tileLayer(
+        `https://api.mapbox.com/styles/v1/mapbox/streets-v12/tiles/{z}/{x}/{y}?access_token=${MAPBOX_TOKEN}`,
+        { tileSize: 512, zoomOffset: -1, attribution: 'Mapbox' }
+      ).addTo(map);
+    }
+
+    function clearSegments() {
+      segmentLayers.forEach(l => map.removeLayer(l));
+      segmentLayers = [];
+      if (startMarker) { map.removeLayer(startMarker); startMarker = null; }
+      if (endMarker) { map.removeLayer(endMarker); endMarker = null; }
+    }
+
+    function fitToSegments(segments) {
+      const latlngs = [];
+      segments.forEach(s => {
+        latlngs.push(s.coords[0], s.coords[1]);
+      });
+      if (latlngs.length) map.fitBounds(latlngs, { padding: [40, 40] });
+    }
+
+    function fmtTime(s) {
+      s = Math.round(s);
+      const m = Math.floor(s / 60);
+      const sec = s % 60;
+      return `${m}m ${sec}s`;
+    }
+
+    async function fetchRoute(start, end) {
+      const url = `/api/route?start=${encodeURIComponent(start)}&end=${encodeURIComponent(end)}`;
+      const r = await fetch(url);
+      if (!r.ok) throw new Error(`Server ${r.status}`);
+      return r.json();
+    }
+
+    function drawRoute(data) {
+      clearSegments();
+
+      // Add Start/End Markers
+      startMarker = L.marker([data.start.lat, data.start.lon]).addTo(map)
+        .bindPopup(`<b>Start:</b> ${data.start.name}`).openPopup();
+      endMarker = L.marker([data.end.lat, data.end.lon]).addTo(map)
+        .bindPopup(`<b>End:</b> ${data.end.name}`);
+
+      // Draw segments for first route (you can extend for multiple)
+      if (data.routes && data.routes.length > 0) {
+        const route = data.routes[0];
+        route.segments.forEach(seg => {
+          const line = L.polyline(seg.coords, { color: seg.color, weight: 5, opacity: 0.9 });
+          line.bindTooltip(
+            `Congestion: ${seg.congestion || 'unknown'}<br>` +
+            (seg.speed_kmh != null ? `Speed: ${seg.speed_kmh} km/h<br>` : '') +
+            (seg.duration_s != null ? `Duration: ${fmtTime(seg.duration_s)}` : ''),
+            { sticky: true }
+          );
+          line.addTo(map);
+          segmentLayers.push(line);
+        });
+        fitToSegments(route.segments);
+
+        const km = (route.distance_m / 1000).toFixed(1);
+        const base = fmtTime(route.durations.base_s);
+        const traffic = fmtTime(route.durations.traffic_s);
+        const delay = fmtTime(route.durations.delay_s);
+
+        document.getElementById('stats').innerHTML =
+          `<strong>Distance:</strong> ${km} km &nbsp; | &nbsp; ` +
+          `<strong>ETA (no traffic):</strong> ${base} &nbsp; | &nbsp; ` +
+          `<strong>ETA (live):</strong> ${traffic} &nbsp; | &nbsp; ` +
+          `<strong>Delay:</strong> ${delay}`;
+      }
+    }
+
+    async function runOnce(start, end) {
+      try {
+        document.getElementById('error').textContent = '';
+        document.getElementById('status').textContent = 'Loading...';
+        const data = await fetchRoute(start, end);
+        drawRoute(data);
+        document.getElementById('status').textContent = `Live (updates every ${REFRESH_SECONDS}s)`;
+      } catch (e) {
+        document.getElementById('error').textContent = 'Failed to fetch route: ' + e.message;
+        document.getElementById('status').textContent = '';
+        clearSegments();
+      }
+    }
+
+    function startAutoRefresh(start, end) {
+      if (refreshTimer) clearInterval(refreshTimer);
+      refreshTimer = setInterval(() => runOnce(start, end), REFRESH_SECONDS * 1000);
+    }
+
+    document.getElementById('go').addEventListener('click', () => {
+      const s = document.getElementById('start').value.trim();
+      const e = document.getElementById('end').value.trim();
+      if (!s || !e) return;
+      runOnce(s, e);
+      startAutoRefresh(s, e);
+    });
+
+    // init
+    initMap();       
+  </script>
+</body>
+</html>
+
